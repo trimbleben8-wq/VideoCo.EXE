@@ -4,6 +4,9 @@ const { exec } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
+const cors = require("cors");
+app.use(cors()); // Add this line right after 'const app = express();'
+
 const app = express();
 
 if (!fs.existsSync("outputs")) fs.mkdirSync("outputs");
@@ -61,4 +64,5 @@ app.post("/convert", upload.single("video"), (req, res) => {
     });
 });
 
-app.listen(3000, () => console.log("Server running on port 3000"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
