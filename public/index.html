@@ -131,7 +131,7 @@ async function uploadVideo() {
     data.append("preset", document.getElementById("preset").value);
     
     // Replace with your actual Render URL
-    const response = await fetch("https://videoco-exe.onrender.com", { method: "POST", body: data });
+    const response = await fetch("https://videoco-exe.onrender.com/convert", { method: "POST", body: data });
     if(!response.ok) { alert("Conversion failed."); return; }
     
     const blob = await response.blob();
