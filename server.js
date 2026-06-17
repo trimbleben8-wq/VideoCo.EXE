@@ -1,13 +1,13 @@
 const express = require("express");
+const cors = require("cors"); // Import cors first
 const multer = require("multer");
 const { exec } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const cors = require("cors");
-app.use(cors()); // Add this line right after 'const app = express();'
+const app = express(); // Define app here
 
-const app = express();
+app.use(cors()); // Use app here (after it is defined)
 
 if (!fs.existsSync("outputs")) fs.mkdirSync("outputs");
 if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
