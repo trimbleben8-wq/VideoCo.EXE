@@ -1,66 +1,80 @@
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
-const { exec } = require("child_process");
+const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
 const app = express();
 app.use(cors());
-
-// Ensure directories exist
-if (!fs.existsSync("outputs")) fs.mkdirSync("outputs");
-if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
+const jobs = new Map();
 
 app.use(express.static("public"));
 const upload = multer({ dest: "uploads/" });
 
-const presets = {
-    yt2006: '-vf "scale=426:240,gblur=sigma=0.7,noise=alls=12:allf=t" -r 15 -c:v libx264 -crf 35 -pix_fmt yuv420p -af "aresample=11025,acrusher=bits=6:mode=log,highpass=f=200,lowpass=f=5000" -ar 11025 -ac 1 -b:a 16k',
-    creepypasta: '-vf "scale=320:180,scale=1280:720,eq=contrast=2.5:brightness=-0.25:saturation=0.15,colorchannelmixer=rr=1.6:gg=0.1:bb=0.1,unsharp=7:7:2.5,noise=alls=25:allf=t" -r 12 -c:v libx264 -crf 42 -pix_fmt yuv420p -af "rubberband=pitch=0.8:tempo=1,apulsator=hz=0.5,aecho=0.8:0.9:500:0.3" -ar 8000 -ac 1 -b:a 8k',
-    lostepisode: '-vf "scale=240:135,scale=1280:720,eq=contrast=2.0:brightness=-0.2:saturation=0.3,gblur=sigma=1.0,noise=alls=25:allf=t,loop=loop=6:size=1:start=50,unsharp=5:5:1.0" -r 1 -c:v libx264 -crf 42 -pix_fmt yuv420p'
-};
-
 app.post("/convert", upload.single("video"), (req, res) => {
-    console.log("--- Request Received ---");
-    if (!req.file) {
-        console.log("Error: No file uploaded");
-        return res.status(400).send("No file uploaded");
-    }
-
+    if (!req.file) return res.status(400).send("No file");
+    
+    const jobId = Date.now().toString();
     const input = path.resolve(req.file.path);
-    const output = path.resolve(`outputs/${Date.now()}.mp4`);
-    const presetName = req.body.preset || "yt2006";
-    const videoSettings = presets[presetName];
-
-    let cmd;
-    if (presetName === "lostepisode") {
-        // Ensure these files are in the root directory
-        const sounds = ["Sound1.mp3", "Sound2.mp3", "Sound3.mp3"];
-        const selectedSound = sounds[Math.floor(Math.random() * sounds.length)];
-        cmd = `ffmpeg -i "${input}" -stream_loop -1 -i "${selectedSound}" -filter_complex "[1:a]aloop=loop=-1:size=2e9,aresample=44100[a_loop]" -map 0:v -map "[a_loop]" ${videoSettings} -shortest -y "${output}"`;
-    } else {
-        cmd = `ffmpeg -i "${input}" ${videoSettings} "${output}" -y`;
+    const output = path.resolve(`outputs/${jobId}.mp4`);
+    const preset = req.body.preset || 'lostepisode';
+    
+    let selectedSound = null;
+    if (preset === 'lostepisode') {
+        selectedSound = path.resolve(["Sound1.mp3", "Sound2.mp3", "Sound3.mp3"][Math.floor(Math.random() * 3)]);
     }
+    
+    const filterMap = {
+        yt2006: "[0:v]scale=640:360,noise=alls=10:allf=t[v];[0:a]lowpass=f=1500,highpass=f=200[a]",
+        creepypasta: "[0:v]scale=1280:720:flags=neighbor,fps=4,eq=contrast=4.5:brightness=-1.2,colorchannelmixer=rr=1.6[v];[0:a]asetrate=44100*0.4,atempo=2.5,lowpass=f=3000,highpass=f=200[a]",
+        lostepisode: "[0:v]scale=640:360,fps=1,eq=contrast=1.5:brightness=0.2:saturation=0.0,noise=alls=25:allf=t[v];[1:a]aloop=loop=-1:size=2e9[a]"
+    };
 
-    console.log("Executing Command:", cmd);
+    jobs.set(jobId, { status: "processing", progress: 0 });
+    res.json({ jobId });
 
-    exec(cmd, (error, stdout, stderr) => {
-        if (error) {
-            console.error("FFmpeg Execution Error:", error.message);
-            console.error("FFmpeg Stderr Output:", stderr);
-            return res.status(500).send("Conversion failed: " + stderr);
-        }
+    const ffprobe = spawn("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input]);
+    let duration = 0;
+    ffprobe.stdout.on("data", (d) => duration = parseFloat(d.toString()));
+
+    ffprobe.on("close", () => {
+        const durationArg = (duration > 0) ? duration.toString() : "30"; 
         
-        console.log("Conversion successful, sending file...");
-        res.download(output, (err) => {
-            if (err) console.error("Download error:", err);
-            // Cleanup
+        const args = selectedSound 
+            ? ["-i", input, "-stream_loop", "-1", "-i", selectedSound, "-filter_complex", filterMap[preset], "-map", "[v]", "-map", "[a]"]
+            : ["-i", input, "-filter_complex", filterMap[preset], "-map", "[v]", "-map", "[a]"];
+
+        args.push("-c:v", "libx264", "-crf", "35", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", durationArg, "-y", output);
+
+        const ffmpeg = spawn("ffmpeg", args);
+
+        // Progress Tracking
+        ffmpeg.stderr.on("data", (data) => {
+            const timeMatch = data.toString().match(/time=(\d{2}):(\d{2}):(\d{2})/);
+            if (timeMatch) {
+                const currentSec = parseInt(timeMatch[1])*3600 + parseInt(timeMatch[2])*60 + parseInt(timeMatch[3]);
+                const progress = Math.min(95, Math.round((currentSec / parseFloat(durationArg)) * 100));
+                jobs.set(jobId, { status: "processing", progress });
+            }
+        });
+
+        // Completion Handling
+        ffmpeg.on("close", (code) => {
+            jobs.set(jobId, { status: code === 0 ? "done" : "error", progress: 100 });
             if (fs.existsSync(input)) fs.unlinkSync(input);
-            if (fs.existsSync(output)) fs.unlinkSync(output);
         });
     });
 });
 
+app.get("/status/:jobId", (req, res) => res.json(jobs.get(req.params.jobId) || { status: "not_found" }));
+app.get("/download/:jobId", (req, res) => {
+    const file = path.resolve(`outputs/${req.params.jobId}.mp4`);
+    res.download(file, "converted.mp4", () => {
+        if (fs.existsSync(file)) fs.unlinkSync(file);
+        jobs.delete(req.params.jobId);
+    });
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
