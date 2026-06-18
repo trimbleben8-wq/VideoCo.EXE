@@ -7,22 +7,31 @@ const path = require("path");
 
 const app = express();
 app.use(cors());
-const jobs = new Map();
 
+// Ensure directories exist on startup
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+const OUTPUTS_DIR = path.join(__dirname, "outputs");
+[UPLOADS_DIR, OUTPUTS_DIR].forEach(dir => {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
+
+const jobs = new Map();
 app.use(express.static("public"));
 const upload = multer({ dest: "uploads/" });
 
 app.post("/convert", upload.single("video"), (req, res) => {
-    if (!req.file) return res.status(400).send("No file");
+    if (!req.file) return res.status(400).send("No file uploaded");
     
     const jobId = Date.now().toString();
     const input = path.resolve(req.file.path);
-    const output = path.resolve(`outputs/${jobId}.mp4`);
+    const output = path.resolve(OUTPUTS_DIR, `${jobId}.mp4`);
     const preset = req.body.preset || 'lostepisode';
     
     let selectedSound = null;
     if (preset === 'lostepisode') {
-        selectedSound = path.resolve(["Sound1.mp3", "Sound2.mp3", "Sound3.mp3"][Math.floor(Math.random() * 3)]);
+        // Ensure your sound files are in the root directory
+        const sounds = ["Sound1.mp3", "Sound2.mp3", "Sound3.mp3"];
+        selectedSound = path.resolve(sounds[Math.floor(Math.random() * sounds.length)]);
     }
     
     const filterMap = {
@@ -34,12 +43,13 @@ app.post("/convert", upload.single("video"), (req, res) => {
     jobs.set(jobId, { status: "processing", progress: 0 });
     res.json({ jobId });
 
+    // Use ffprobe to get duration
     const ffprobe = spawn("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input]);
     let duration = 0;
     ffprobe.stdout.on("data", (d) => duration = parseFloat(d.toString()));
 
     ffprobe.on("close", () => {
-        const durationArg = (duration > 0) ? duration.toString() : "30"; 
+        const durationArg = (duration > 0 && !isNaN(duration)) ? duration.toString() : "30";
         
         const args = selectedSound 
             ? ["-i", input, "-stream_loop", "-1", "-i", selectedSound, "-filter_complex", filterMap[preset], "-map", "[v]", "-map", "[a]"]
@@ -49,8 +59,9 @@ app.post("/convert", upload.single("video"), (req, res) => {
 
         const ffmpeg = spawn("ffmpeg", args);
 
-        // Progress Tracking
+        // LOGGING: This will show in Render's "Logs" tab
         ffmpeg.stderr.on("data", (data) => {
+            console.log(`FFMPEG: ${data.toString()}`);
             const timeMatch = data.toString().match(/time=(\d{2}):(\d{2}):(\d{2})/);
             if (timeMatch) {
                 const currentSec = parseInt(timeMatch[1])*3600 + parseInt(timeMatch[2])*60 + parseInt(timeMatch[3]);
@@ -59,19 +70,29 @@ app.post("/convert", upload.single("video"), (req, res) => {
             }
         });
 
-        // Completion Handling
+        ffmpeg.on("error", (err) => {
+            console.error("FFmpeg spawn error:", err);
+            jobs.set(jobId, { status: "error" });
+        });
+
         ffmpeg.on("close", (code) => {
-            jobs.set(jobId, { status: code === 0 ? "done" : "error", progress: 100 });
-            if (fs.existsSync(input)) fs.unlinkSync(input);
+            if (code === 0) {
+                jobs.set(jobId, { status: "done", progress: 100 });
+            } else {
+                console.error(`FFmpeg exited with code ${code}`);
+                jobs.set(jobId, { status: "error" });
+            }
+            if (fs.existsSync(input)) fs.unlink(input, () => {});
         });
     });
 });
 
 app.get("/status/:jobId", (req, res) => res.json(jobs.get(req.params.jobId) || { status: "not_found" }));
 app.get("/download/:jobId", (req, res) => {
-    const file = path.resolve(`outputs/${req.params.jobId}.mp4`);
+    const file = path.resolve(OUTPUTS_DIR, `${req.params.jobId}.mp4`);
+    if (!fs.existsSync(file)) return res.status(404).send("File not found");
     res.download(file, "converted.mp4", () => {
-        if (fs.existsSync(file)) fs.unlinkSync(file);
+        if (fs.existsSync(file)) fs.unlink(file, () => {});
         jobs.delete(req.params.jobId);
     });
 });
